@@ -50,6 +50,10 @@ impl Fds {
         self.map.get(bind)
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.map.is_empty()
+    }
+
     pub fn serialize(&self) -> (Vec<String>, Vec<RawFd>) {
         self.map.iter().map(|(key, val)| (key.clone(), val)).unzip()
     }
@@ -129,11 +133,11 @@ where
     };
     socket::bind(listen_fd, &unix_addr).unwrap();
 
-    /* sock is created before we change user, need to give permission to all */
+    /* sock is created before we change user, need to give permission */
     stat::fchmodat(
         None,
         path,
-        stat::Mode::all(),
+        stat::Mode::from_bits_truncate(0o666),
         stat::FchmodatFlags::FollowSymlink,
     )
     .unwrap();
