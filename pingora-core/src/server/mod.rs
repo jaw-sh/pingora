@@ -368,6 +368,22 @@ impl Server {
         self.bootstrap.lock().get_fds()
     }
 
+    /// Inject a pre-populated FD table for inherited listening sockets.
+    ///
+    /// This is the entry point for non-Pingora-managed graceful upgrade
+    /// flows such as systemd socket activation: the caller builds a
+    /// [`ListenFds`] table mapping bind-address strings to inherited FDs
+    /// and hands it off via this method before [`Server::run_forever`] /
+    /// [`Server::run`]. Listeners whose `ServerAddress` matches an entry
+    /// in the table will be created from the inherited FD instead of
+    /// binding a fresh socket.
+    ///
+    /// Delegates to [`Bootstrap::set_fds`](crate::server::bootstrap_services::Bootstrap::set_fds).
+    #[cfg(unix)]
+    pub fn set_listen_fds(&mut self, fds: ListenFds) {
+        self.bootstrap.lock().set_fds(fds);
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn run_service(
         mut service: Box<dyn ServiceWithDependents>,

@@ -242,6 +242,23 @@ impl Bootstrap {
     pub fn get_fds(&self) -> ListenFds {
         self.listen_fds.clone()
     }
+
+    /// Inject a pre-populated FD table for inherited listening sockets.
+    ///
+    /// This is the entry point for non-Pingora-managed graceful upgrade
+    /// flows such as systemd socket activation: the caller builds a
+    /// [`ListenFds`] table mapping bind-address strings to inherited FDs
+    /// and hands it off before any listening service has started.
+    ///
+    /// The contents are moved through the existing `Arc<Mutex<Fds>>` so
+    /// that any [`get_fds`](Self::get_fds) clone already handed out to a
+    /// service sees the update. Must be called before `run_forever` /
+    /// `run` to take effect.
+    #[cfg(unix)]
+    pub fn set_fds(&self, fds: ListenFds) {
+        let mut new = fds.lock();
+        *self.listen_fds.lock() = std::mem::replace(&mut *new, Fds::new());
+    }
 }
 
 #[async_trait]
