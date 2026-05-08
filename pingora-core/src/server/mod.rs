@@ -327,6 +327,12 @@ impl Server {
 
     #[cfg(unix)]
     fn load_fds(&mut self, upgrade: bool) -> Result<(), nix::Error> {
+        // Honour any FD table that the caller has already injected (for
+        // example, FDs inherited from systemd socket activation). Only fall
+        // back to building a fresh table when nothing has been provided.
+        if self.listen_fds.is_some() {
+            return Ok(());
+        }
         let mut fds = Fds::new();
         if upgrade {
             debug!("Trying to receive socks");
@@ -334,6 +340,24 @@ impl Server {
         }
         self.listen_fds = Some(Arc::new(Mutex::new(fds)));
         Ok(())
+    }
+
+    /// Inject a pre-populated FD table for inherited listening sockets.
+    ///
+    /// This is the entry point for non-Pingora-managed graceful upgrade flows
+    /// such as systemd socket activation: the caller builds a [`ListenFds`]
+    /// table mapping bind-address strings to inherited FDs, then calls this
+    /// method before [`Server::run_forever`] / [`Server::run`]. Listeners
+    /// whose `ServerAddress` matches an entry in the table will be created
+    /// from the inherited FD instead of binding a fresh socket.
+    ///
+    /// Must be called before any service that listens is started. When
+    /// combined with `--upgrade`, the inherited FD table takes priority over
+    /// the upgrade-socket transfer (the upgrade-socket path is only consulted
+    /// when no FD table has been injected).
+    #[cfg(unix)]
+    pub fn set_listen_fds(&mut self, fds: ListenFds) {
+        self.listen_fds = Some(fds);
     }
 
     /// Create a new [`Server`], using the [`Opt`] and [`ServerConf`] values provided
