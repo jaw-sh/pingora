@@ -61,7 +61,8 @@ static BIND_LOCKS: LazyLock<flurry::HashMap<String, Arc<tokio::sync::Mutex<()>>>
 
 const TCP_LISTENER_MAX_TRY: usize = 30;
 const TCP_LISTENER_TRY_STEP: Duration = Duration::from_secs(1);
-// TODO: configurable backlog
+/// Default listen backlog when `TcpSocketOptions::backlog` is unset. Bounded
+/// by `net.core.somaxconn` (the kernel uses `min(backlog, somaxconn)`).
 const LISTENER_BACKLOG: u32 = 65535;
 
 /// Address for listening server, either TCP/UDS socket.
@@ -119,7 +120,12 @@ pub struct TcpSocketOptions {
     /// Set the receive buffer size for accepted connections. See
     /// [SO_RCVBUF](https://man7.org/linux/man-pages/man7/socket.7.html).
     pub tcp_recv_buf: Option<usize>,
-    // TODO: allow configuring reuseaddr, backlog, etc. from here?
+    /// Listen backlog passed to `listen(2)`. If unset, falls back to
+    /// `LISTENER_BACKLOG` (65535). The kernel clamps the effective value to
+    /// `net.core.somaxconn`, so raise that sysctl in parallel when setting
+    /// a value above the default.
+    pub backlog: Option<u32>,
+    // TODO: allow configuring reuseaddr, etc. from here?
 }
 
 #[cfg(unix)]
@@ -224,16 +230,20 @@ fn from_raw_fd(address: &ServerAddress, fd: i32) -> Result<Listener> {
             uds::set_perms(addr, perm.clone())?;
             Ok(uds::set_backlog(std_listener, LISTENER_BACKLOG)?.into())
         }
-        ServerAddress::Tcp(_, _) => {
+        ServerAddress::Tcp(_, opt) => {
             #[cfg(unix)]
             let std_listener_socket = unsafe { std::net::TcpStream::from_raw_fd(fd) };
             #[cfg(windows)]
             let std_listener_socket = unsafe { std::net::TcpStream::from_raw_socket(fd as u64) };
             let listener_socket = TcpSocket::from_std_stream(std_listener_socket);
+            let backlog = opt
+                .as_ref()
+                .and_then(|o| o.backlog)
+                .unwrap_or(LISTENER_BACKLOG);
             // Note that we call listen on an already listening socket
             // POSIX undefined but on Linux it will update the backlog size
             Ok(listener_socket
-                .listen(LISTENER_BACKLOG)
+                .listen(backlog)
                 .or_err_with(BindError, || format!("Listen() failed on {address:?}"))?
                 .into())
         }
@@ -241,6 +251,10 @@ fn from_raw_fd(address: &ServerAddress, fd: i32) -> Result<Listener> {
 }
 
 async fn bind_tcp(addr: &str, opt: Option<TcpSocketOptions>) -> Result<Listener> {
+    let backlog = opt
+        .as_ref()
+        .and_then(|o| o.backlog)
+        .unwrap_or(LISTENER_BACKLOG);
     let mut try_count = 0;
     loop {
         let sock_addr = addr
@@ -267,7 +281,7 @@ async fn bind_tcp(addr: &str, opt: Option<TcpSocketOptions>) -> Result<Listener>
         match listener_socket.bind(sock_addr) {
             Ok(()) => {
                 break Ok(listener_socket
-                    .listen(LISTENER_BACKLOG)
+                    .listen(backlog)
                     .or_err(BindError, "bind() failed")?
                     .into())
             }
