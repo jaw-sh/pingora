@@ -638,6 +638,17 @@ impl Session {
         }
     }
 
+    /// Enable retry buffering with a per-session buffer size limit instead of
+    /// the default 64 KiB. See the per-protocol sessions for details.
+    pub fn enable_retry_buffering_with_limit(&mut self, limit: usize) {
+        match self {
+            Self::H1(s) => s.enable_retry_buffering_with_limit(limit),
+            Self::H2(s) => s.enable_retry_buffering_with_limit(limit),
+            Self::Subrequest(s) => s.enable_retry_buffering_with_limit(limit),
+            Self::Custom(s) => s.enable_retry_buffering_with_limit(limit),
+        }
+    }
+
     pub fn get_retry_buffer(&self) -> Option<Bytes> {
         match self {
             Self::H1(s) => s.get_retry_buffer(),

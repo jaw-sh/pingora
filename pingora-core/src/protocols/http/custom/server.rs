@@ -88,6 +88,8 @@ pub trait Session: Send + Sync + Unpin + 'static {
 
     fn enable_retry_buffering(&mut self);
 
+    fn enable_retry_buffering_with_limit(&mut self, limit: usize);
+
     fn retry_buffer_truncated(&self) -> bool;
 
     fn get_retry_buffer(&self) -> Option<Bytes>;
@@ -251,6 +253,10 @@ impl Session for () {
 
     fn enable_retry_buffering(&mut self) {
         unreachable!("server session: enable_retry_bufferings")
+    }
+
+    fn enable_retry_buffering_with_limit(&mut self, _limit: usize) {
+        unreachable!("server session: enable_retry_buffering_with_limit")
     }
 
     fn retry_buffer_truncated(&self) -> bool {
