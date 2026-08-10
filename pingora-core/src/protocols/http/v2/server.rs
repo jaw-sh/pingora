@@ -50,16 +50,18 @@ pub use h2::server::Builder as H2Options;
 const DEFAULT_MAX_HEADER_LIST_SIZE: u32 = 64 * 1024;
 const DEFAULT_MAX_CONCURRENT_STREAMS: u32 = 100;
 
-// Per-connection lifetime budget for malformed downstream requests (e.g.
-// ambiguous Content-Length framing) that we will reset before treating the
-// connection as abusive and tearing it down. The count is NOT reset by valid
-// streams, so a client cannot evade the bound by interleaving valid requests.
-// A well-behaved client never sends malformed framing, so this is never tripped
-// in practice; it bounds the total reset work a misbehaving or malicious client
-// can drive over the life of a single connection.
+/// Per-connection lifetime budget for malformed downstream requests (e.g.
+/// ambiguous Content-Length framing) that we will reset before treating the
+/// connection as abusive and tearing it down. The count is NOT reset by valid
+/// streams, so a client cannot evade the bound by interleaving valid requests.
+/// A well-behaved client never sends malformed framing, so this is never tripped
+/// in practice; it bounds the total reset work a misbehaving or malicious client
+/// can drive over the life of a single connection.
+///
+/// Enforced by [`HttpSession::from_h2_conn_with_malformed_budget`].
 // TODO: expose this through HTTP/2 server configuration if deployments need a
 // different tolerance for malformed stream resets.
-const MAX_MALFORMED_STREAMS_PER_CONN: usize = 32;
+pub const MAX_MALFORMED_STREAMS_PER_CONN: usize = 32;
 
 /// Build [`H2Options`] with bounded defaults for received requests.
 ///
@@ -264,10 +266,11 @@ impl HttpSession {
     /// * `Ok(None)` — the connection is closing, so the loop can exit.
     ///
     /// This convenience wrapper uses a fresh malformed-stream counter on every
-    /// call. It preserves the public API, but does not enforce the
-    /// [`MAX_MALFORMED_STREAMS_PER_CONN`] budget across repeated calls by an
-    /// external accept loop. Pingora's built-in downstream accept loop uses the
-    /// internal budgeted helper to share one counter for the connection lifetime.
+    /// call, so it does not enforce the [`MAX_MALFORMED_STREAMS_PER_CONN`]
+    /// budget across the repeated calls an accept loop makes. An accept loop
+    /// should call [`Self::from_h2_conn_with_malformed_budget`] instead and own
+    /// the counter for the lifetime of the connection, which is what Pingora's
+    /// built-in downstream accept loop does.
     pub async fn from_h2_conn(
         conn: &mut H2Connection<Stream>,
         digest: Arc<Digest>,
@@ -285,7 +288,12 @@ impl HttpSession {
     /// never reset by valid streams), so a client cannot evade the
     /// [`MAX_MALFORMED_STREAMS_PER_CONN`] bound by interleaving valid requests.
     /// Callers should initialize it to `0` once per connection.
-    async fn from_h2_conn_with_malformed_budget(
+    ///
+    /// Prefer this over [`Self::from_h2_conn`] when driving an accept loop: a
+    /// loop built on the wrapper resets the budget on every call, so a client
+    /// can send unbounded malformed streams over one connection, each costing a
+    /// header decode and a reset.
+    pub async fn from_h2_conn_with_malformed_budget(
         conn: &mut H2Connection<Stream>,
         digest: Arc<Digest>,
         malformed_streams: &mut usize,
