@@ -582,8 +582,21 @@ impl HttpSession {
     }
 
     pub fn enable_retry_buffering(&mut self) {
+        self.enable_retry_buffering_with_limit(BODY_BUF_LIMIT)
+    }
+
+    /// Enable retry buffering with a caller-supplied size limit instead of the
+    /// default 64 KiB.
+    ///
+    /// A caller that drains the request body itself, rather than letting it be
+    /// streamed upstream, depends on the retry buffer to carry that body. A
+    /// body larger than the cap truncates the buffer and makes
+    /// [`Self::get_retry_buffer`] return `None`, so raising the limit keeps
+    /// such bodies intact. [`Self::retry_buffer_truncated`] still reports
+    /// overflow. No-op when buffering is already enabled.
+    pub fn enable_retry_buffering_with_limit(&mut self, limit: usize) {
         if self.retry_buffer.is_none() {
-            self.retry_buffer = Some(FixedBuffer::new(BODY_BUF_LIMIT))
+            self.retry_buffer = Some(FixedBuffer::new(limit))
         }
     }
 
