@@ -61,7 +61,7 @@ static BIND_LOCKS: LazyLock<flurry::HashMap<String, Arc<tokio::sync::Mutex<()>>>
 
 const TCP_LISTENER_MAX_TRY: usize = 30;
 const TCP_LISTENER_TRY_STEP: Duration = Duration::from_secs(1);
-// TODO: configurable backlog
+/// Default listen backlog, used when [`TcpSocketOptions::backlog`] is unset.
 const LISTENER_BACKLOG: u32 = 65535;
 
 /// Address for listening server, either TCP/UDS socket.
@@ -119,7 +119,13 @@ pub struct TcpSocketOptions {
     /// Set the receive buffer size for accepted connections. See
     /// [SO_RCVBUF](https://man7.org/linux/man-pages/man7/socket.7.html).
     pub tcp_recv_buf: Option<usize>,
-    // TODO: allow configuring reuseaddr, backlog, etc. from here?
+    /// Set the maximum length of the queue of pending connections, defaulting
+    /// to 65535 when unset. Linux caps the effective length at
+    /// `net.core.somaxconn`, which must be raised alongside this option for a
+    /// larger value to take effect.
+    /// See the [man page](https://man7.org/linux/man-pages/man2/listen.2.html) for more information.
+    pub backlog: Option<u32>,
+    // TODO: allow configuring reuseaddr, etc. from here?
 }
 
 #[cfg(unix)]
@@ -224,16 +230,20 @@ fn from_raw_fd(address: &ServerAddress, fd: i32) -> Result<Listener> {
             uds::set_perms(addr, perm.clone())?;
             Ok(uds::set_backlog(std_listener, LISTENER_BACKLOG)?.into())
         }
-        ServerAddress::Tcp(_, _) => {
+        ServerAddress::Tcp(_, opt) => {
             #[cfg(unix)]
             let std_listener_socket = unsafe { std::net::TcpStream::from_raw_fd(fd) };
             #[cfg(windows)]
             let std_listener_socket = unsafe { std::net::TcpStream::from_raw_socket(fd as u64) };
             let listener_socket = TcpSocket::from_std_stream(std_listener_socket);
+            let backlog = opt
+                .as_ref()
+                .and_then(|o| o.backlog)
+                .unwrap_or(LISTENER_BACKLOG);
             // Note that we call listen on an already listening socket
             // POSIX undefined but on Linux it will update the backlog size
             Ok(listener_socket
-                .listen(LISTENER_BACKLOG)
+                .listen(backlog)
                 .or_err_with(BindError, || format!("Listen() failed on {address:?}"))?
                 .into())
         }
@@ -241,6 +251,10 @@ fn from_raw_fd(address: &ServerAddress, fd: i32) -> Result<Listener> {
 }
 
 async fn bind_tcp(addr: &str, opt: Option<TcpSocketOptions>) -> Result<Listener> {
+    let backlog = opt
+        .as_ref()
+        .and_then(|o| o.backlog)
+        .unwrap_or(LISTENER_BACKLOG);
     let mut try_count = 0;
     loop {
         let sock_addr = addr
@@ -267,7 +281,7 @@ async fn bind_tcp(addr: &str, opt: Option<TcpSocketOptions>) -> Result<Listener>
         match listener_socket.bind(sock_addr) {
             Ok(()) => {
                 break Ok(listener_socket
-                    .listen(LISTENER_BACKLOG)
+                    .listen(backlog)
                     .or_err(BindError, "bind() failed")?
                     .into())
             }
@@ -643,6 +657,38 @@ mod test {
 
         // Verify the first listener still works
         assert_eq!(listener1.as_str(), addr);
+    }
+
+    #[tokio::test]
+    async fn test_tcp_backlog() {
+        // A backlog of 1 is the smallest value that still admits a connection,
+        // so it exercises the configured value rather than the 65535 default.
+        // The queue depth the kernel actually applies is capped by
+        // net.core.somaxconn and cannot be read back portably, so this asserts
+        // the option is accepted by listen() and the listener still serves.
+        let sock_opt = Some(TcpSocketOptions {
+            backlog: Some(1),
+            ..Default::default()
+        });
+
+        let mut builder = ListenerEndpoint::builder();
+
+        builder.listen_addr(ServerAddress::Tcp("127.0.0.1:0".into(), sock_opt));
+
+        #[cfg(unix)]
+        let listener = builder.listen(None).await.unwrap();
+
+        #[cfg(windows)]
+        let listener = builder.listen().await.unwrap();
+
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            listener.accept().await.unwrap();
+        });
+        tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("can connect to TCP listener with an explicit backlog");
     }
 
     #[cfg(feature = "connection_filter")]
