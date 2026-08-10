@@ -386,6 +386,27 @@ impl Server {
             })
     }
 
+    /// Seed the table of inherited listening file descriptors.
+    ///
+    /// Pingora normally receives these over its own upgrade socket during a
+    /// graceful upgrade. This is the entry point for a process that acquires
+    /// them some other way, such as systemd socket activation via `LISTEN_FDS`:
+    /// build a [`Fds`] table keyed by bind address and hand it over before
+    /// [`Self::run_forever`] or [`Self::run`]. A listener whose
+    /// [`ServerAddress`](crate::listeners::ServerAddress) matches an entry is
+    /// created from that descriptor instead of binding a fresh socket.
+    ///
+    /// The keys must be the same strings the services bind, since any
+    /// descriptor not claimed by a registered service is closed before startup.
+    /// Registering one descriptor under several spellings of an address will
+    /// therefore close it.
+    ///
+    /// Has no effect once the server is running.
+    #[cfg(unix)]
+    pub fn set_listen_fds(&mut self, fds: Fds) {
+        self.bootstrap.lock().set_fds(fds);
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn run_service(
         mut service: Box<dyn ServiceWithDependents>,
