@@ -273,6 +273,19 @@ impl Bootstrap {
     pub fn get_fds(&self) -> ListenFds {
         self.listen_fds.clone()
     }
+
+    /// Seed the table of inherited listening file descriptors.
+    ///
+    /// See [`Server::set_listen_fds`](crate::server::Server::set_listen_fds).
+    /// The table is written through the existing `Arc<Mutex<Fds>>` so that any
+    /// [`get_fds`](Self::get_fds) clone already handed to a service observes
+    /// it. A later [`load_fds`](Self::load_fds) during a graceful upgrade
+    /// replaces it, since descriptors passed over the upgrade socket describe
+    /// the sockets the previous generation was actually serving.
+    #[cfg(unix)]
+    pub fn set_fds(&self, fds: Fds) {
+        *self.listen_fds.lock() = fds;
+    }
 }
 
 #[async_trait]
@@ -290,6 +303,48 @@ impl BackgroundService for BootstrapService {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    // Both tests below cover table bookkeeping only and never reach a syscall,
+    // so they use a placeholder rather than opening a socket. Opening one would
+    // add to the descriptor churn that the fd-liveness assertions in
+    // transfer_fd::close_unclaimed_tests already race against, since the kernel
+    // hands out the lowest free number. Closing this value is a no-op error.
+    const PLACEHOLDER_FD: i32 = -1;
+
+    #[test]
+    fn set_fds_is_observed_through_previously_cloned_handles() {
+        let (execution_phase_watch, _) = broadcast::channel(1);
+        let bootstrap = Bootstrap::new(&None, &ServerConf::default(), &execution_phase_watch);
+        // Services take their handle during registration, before the caller
+        // gets a chance to inject anything.
+        let handed_out = bootstrap.get_fds();
+
+        let mut fds = Fds::new();
+        fds.add("127.0.0.1:80".to_string(), PLACEHOLDER_FD);
+        bootstrap.set_fds(fds);
+
+        assert_eq!(
+            *handed_out.lock().get("127.0.0.1:80").unwrap(),
+            PLACEHOLDER_FD
+        );
+    }
+
+    #[test]
+    fn injected_fds_are_pruned_against_service_addresses() {
+        let (execution_phase_watch, _) = broadcast::channel(1);
+        let mut bootstrap = Bootstrap::new(&None, &ServerConf::default(), &execution_phase_watch);
+
+        let mut fds = Fds::new();
+        fds.add("127.0.0.1:80".to_string(), PLACEHOLDER_FD);
+        fds.add("127.0.0.1:9090".to_string(), PLACEHOLDER_FD);
+        bootstrap.set_fds(fds);
+
+        bootstrap.set_expected_listen_addrs(["127.0.0.1:80".to_string()].into_iter().collect());
+
+        let fds = bootstrap.listen_fds.lock();
+        assert_eq!(*fds.get("127.0.0.1:80").unwrap(), PLACEHOLDER_FD);
+        assert!(fds.get("127.0.0.1:9090").is_none());
+    }
 
     #[test]
     fn expected_addresses_prune_already_loaded_fds() {
