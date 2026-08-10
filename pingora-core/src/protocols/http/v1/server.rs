@@ -1153,8 +1153,21 @@ impl HttpSession {
     }
 
     pub fn enable_retry_buffering(&mut self) {
+        self.enable_retry_buffering_with_limit(BODY_BUF_LIMIT)
+    }
+
+    /// Enable retry buffering with a caller-supplied size limit instead of the
+    /// default 64 KiB.
+    ///
+    /// A caller that drains the request body itself, rather than letting it be
+    /// streamed upstream, depends on the retry buffer to carry that body. A
+    /// body larger than the cap truncates the buffer and makes
+    /// [`Self::get_retry_buffer`] return `None`, so raising the limit keeps
+    /// such bodies intact. [`Self::retry_buffer_truncated`] still reports
+    /// overflow. No-op when buffering is already enabled.
+    pub fn enable_retry_buffering_with_limit(&mut self, limit: usize) {
         if self.retry_buffer.is_none() {
-            self.retry_buffer = Some(FixedBuffer::new(BODY_BUF_LIMIT))
+            self.retry_buffer = Some(FixedBuffer::new(limit))
         }
     }
 
@@ -1959,6 +1972,39 @@ mod tests_stream {
         assert_eq!(res, b"abc".as_slice());
         assert_eq!(http_stream.body_reader.body_state, ParseState::Complete(3));
         assert_eq!(http_stream.body_bytes_read(), 3);
+    }
+
+    async fn drain_body_into_retry_buffer(limit: Option<usize>, body_len: usize) -> HttpSession {
+        init_log();
+        let body = vec![b'a'; body_len];
+        let head = format!("POST / HTTP/1.1\r\nContent-Length: {body_len}\r\n\r\n");
+        let mock_io = Builder::new().read(head.as_bytes()).read(&body[..]).build();
+        let mut http_stream = HttpSession::new(Box::new(mock_io));
+        http_stream.read_request().await.unwrap();
+        match limit {
+            Some(limit) => http_stream.enable_retry_buffering_with_limit(limit),
+            None => http_stream.enable_retry_buffering(),
+        }
+        while http_stream.read_body_bytes().await.unwrap().is_some() {}
+        http_stream
+    }
+
+    #[tokio::test]
+    async fn retry_buffer_default_limit_truncates_oversized_body() {
+        let body_len = BODY_BUF_LIMIT + 1;
+        let http_stream = drain_body_into_retry_buffer(None, body_len).await;
+
+        assert!(http_stream.retry_buffer_truncated());
+        assert!(http_stream.get_retry_buffer().is_none());
+    }
+
+    #[tokio::test]
+    async fn retry_buffer_raised_limit_keeps_oversized_body() {
+        let body_len = BODY_BUF_LIMIT + 1;
+        let http_stream = drain_body_into_retry_buffer(Some(body_len), body_len).await;
+
+        assert!(!http_stream.retry_buffer_truncated());
+        assert_eq!(http_stream.get_retry_buffer().unwrap().len(), body_len);
     }
 
     #[tokio::test]
